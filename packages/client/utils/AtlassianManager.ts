@@ -1,6 +1,9 @@
 import AbortController from 'abort-controller'
 import JiraIssueId from '../shared/gqlIds/JiraIssueId'
 import {SprintPokerDefaults} from '../types/constEnums'
+import sleep from './sleep'
+// import appOrigin from '../../server/appOrigin'
+import makeAppURL from './makeAppURL'
 
 export interface JiraUser {
   self: string
@@ -262,6 +265,31 @@ interface JiraPageBean<T> {
   values: T[]
 }
 
+interface WebhookDetails {
+  jqlFilter: string
+  fieldIdsFilter?: string[]
+  events: jiraWebhookEventType[]
+}
+
+interface Webhook {
+  id: number
+  jqlFilter: string
+  fieldIdsFilter: string[]
+  issuePropertyKeysFilter: string[]
+  events: jiraWebhookEventType[]
+  expirationDate: string
+}
+
+type jiraWebhookEventType =
+  | 'jira:issue_created'
+  | 'jira:issue_updated'
+  | 'jira:issue_deleted'
+  | 'comment:created'
+  | 'comment_updated'
+  | 'comment_deleted'
+  | 'issue_property_set'
+  | 'issue_property_deleted'
+
 export function isJiraNoAccessError<T>(
   response: T | JiraNoAccessError
 ): response is JiraNoAccessError {
@@ -273,11 +301,39 @@ export type JiraScreensResponse = JiraPageBean<JiraScreen>
 const MAX_REQUEST_TIME = 5000
 
 export type JiraPermissionScope =
-  | 'read:jira-user'
-  | 'read:jira-work'
-  | 'write:jira-work'
+  | 'read:jql:jira'
+  | 'read:field:jira'
+  | 'read:field.option:jira'
+  | 'read:field.default-value:jira'
+  | 'delete:project:jira'
+  | 'delete:webhook:jira'
   | 'offline_access'
-  | 'manage:jira-project'
+  | 'read:application-role:jira'
+  | 'read:avatar:jira'
+  | 'read:field-configuration:jira'
+  | 'read:group:jira'
+  | 'read:issue-details:jira'
+  | 'read:issue-meta:jira'
+  | 'read:issue-security-level:jira'
+  | 'read:issue-type-hierarchy:jira'
+  | 'read:issue-type:jira'
+  | 'read:issue:jira'
+  | 'read:issue.changelog:jira'
+  | 'read:issue.vote:jira'
+  | 'read:project-category:jira'
+  | 'read:project-version:jira'
+  | 'read:project:jira'
+  | 'read:project.component:jira'
+  | 'read:project.property:jira'
+  | 'read:status:jira'
+  | 'read:user:jira'
+  | 'read:webhook:jira'
+  | 'write:attachment:jira'
+  | 'write:comment:jira'
+  | 'write:comment.property:jira'
+  | 'write:issue:jira'
+  | 'write:project:jira'
+  | 'write:webhook:jira'
 
 export class RateLimitError {
   retryAt: Date
@@ -294,12 +350,47 @@ Object.setPrototypeOf(RateLimitError.prototype, Error.prototype)
 export default abstract class AtlassianManager {
   abstract fetch: typeof fetch
   static SCOPE: JiraPermissionScope[] = [
-    'read:jira-user',
-    'read:jira-work',
-    'write:jira-work',
-    'offline_access'
+    'read:jql:jira',
+    'read:field:jira',
+    'read:field.option:jira',
+    'read:field.default-value:jira',
+    'delete:project:jira',
+    'delete:webhook:jira',
+    'offline_access',
+    'read:application-role:jira',
+    'read:avatar:jira',
+    'read:field-configuration:jira',
+    'read:group:jira',
+    'read:issue-details:jira',
+    'read:issue-meta:jira',
+    'read:issue-security-level:jira',
+    'read:issue-type-hierarchy:jira',
+    'read:issue-type:jira',
+    'read:issue:jira',
+    'read:issue.changelog:jira',
+    'read:issue.vote:jira',
+    'read:project-category:jira',
+    'read:project-version:jira',
+    'read:project:jira',
+    'read:project.component:jira',
+    'read:project.property:jira',
+    'read:status:jira',
+    'read:user:jira',
+    'read:webhook:jira',
+    'write:attachment:jira',
+    'write:comment:jira',
+    'write:comment.property:jira',
+    'write:issue:jira',
+    'write:project:jira',
+    'write:webhook:jira'
   ]
-  static MANAGE_SCOPE: JiraPermissionScope[] = [...AtlassianManager.SCOPE, 'manage:jira-project']
+  static MANAGE_SCOPE: JiraPermissionScope[] = [
+    ...AtlassianManager.SCOPE,
+    // ended up having to add these to the default SCOPE not sure if the distinction between SCOPE and MANAGE_SCOPE is still relevant
+    'read:project:jira',
+    'write:project:jira',
+    'delete:project:jira'
+  ]
   accessToken: string
   private headers = {
     Authorization: '',
@@ -398,10 +489,11 @@ export default abstract class AtlassianManager {
     }
     return new Error(`Unknown Jira error: ${JSON.stringify(error)}`)
   }
-  private readonly delete = async (url) => {
+  private readonly delete = async (url, payload?: any) => {
     const res = await this.fetchWithTimeout(url, {
       method: 'DELETE',
-      headers: this.headers
+      headers: this.headers,
+      body: payload && JSON.stringify(payload)
     })
     if (res instanceof Error) {
       return res
@@ -829,6 +921,89 @@ export default abstract class AtlassianManager {
   ) {
     return this.delete(
       `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/screens/${screenId}/tabs/${tabId}/fields/${fieldId}`
+    )
+  }
+
+  async registerWebhooks(cloudId: string, webhooks: WebhookDetails[]) {
+    return this.post(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/webhook`, {
+      url: makeAppURL('http://localhost:3000', '/webhooks/jira'),
+      // url: makeAppURL(appOrigin, '/webhooks/jira'),
+      webhooks
+    })
+  }
+
+  async deleteWebhooks(cloudId: string, webhookIds: number[]) {
+    return this.delete(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/webhook`, {
+      webhookIds
+    })
+  }
+
+  async extendWebhooks(cloudId: string, webhookIds: number[]) {
+    return this.put(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/webhook/refresh`, {
+      webhookIds
+    })
+  }
+
+  async getWebhooks(cloudId: string) {
+    return this.get<JiraPageBean<Webhook>>(
+      `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/webhook`
+    )
+  }
+  async getAllWebhooks(cloudIds: string[]) {
+    return Promise.all(cloudIds.map((cloudId) => this.getWebhooks(cloudId)))
+  }
+
+  async updateWebhook(webhookId: number, cloudId: string) {
+    // register new hook
+    await this.registerAllProjectsWebhooks([cloudId])
+    // delete old hook
+    await this.deleteWebhooks(cloudId, [webhookId])
+  }
+
+  async registerOrUpdateWebhooks(cloudIds: string[]) {
+    const webhooksAndErrors = await this.getAllWebhooks(cloudIds)
+    await Promise.all(
+      webhooksAndErrors.map(async (entry, index) => {
+        if (entry instanceof Error) {
+          return Promise.reject(Error)
+        } else if (entry instanceof RateLimitError) {
+          // retry
+          const waitTime = Date.now() - entry.retryAt.getUTCMilliseconds()
+          if (waitTime > 0) await sleep(waitTime)
+          return this.registerOrUpdateWebhooks([cloudIds[index]!])
+        } else if (entry.total > 0) {
+          return this.updateWebhook(entry.values[0]!.id, cloudIds[index]!)
+        } else {
+          return this.registerAllProjectsWebhooks([cloudIds[index]!])
+        }
+      })
+    )
+  }
+
+  async registerAllProjectsWebhooks(cloudIds: string[]) {
+    if (cloudIds.length === 0) return
+    const allProjects = await this.getAllProjects(cloudIds)
+
+    const initial = cloudIds.map<{cloudId: string; projects: JiraProject[]}>((id) => ({
+      cloudId: id,
+      projects: [] as JiraProject[]
+    }))
+
+    const projectsByCloudId = allProjects.reduce((projectsByCloud, project) => {
+      const index = projectsByCloud.findIndex(({cloudId}) => project.cloudId === cloudId)
+      projectsByCloud && projectsByCloud[index]!.projects.push(project)
+      return projectsByCloud
+    }, initial)
+    return Promise.all(
+      projectsByCloudId.map((cloudIdProjects) => {
+        const {cloudId, projects} = cloudIdProjects
+        const jqlFilter = `project IN (${projects.map(({key}) => key).join(',')})`
+        const webhook: WebhookDetails = {
+          jqlFilter,
+          events: ['jira:issue_updated']
+        }
+        return this.registerWebhooks(cloudId, [webhook])
+      })
     )
   }
 }

@@ -81,6 +81,9 @@ export default {
       ...atlassianAuthsToUpdate
     ])
 
+    // TODO register webhook if one doesn't exist for team
+    await manager.registerOrUpdateWebhooks(cloudIds)
+
     segmentIo.track({
       userId: viewerId,
       event: 'Added Integration',
